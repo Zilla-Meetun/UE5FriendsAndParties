@@ -2,6 +2,7 @@
 
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "GenericPlatform/GenericPlatformHttp.h"
 #include "HttpModule.h"
 #include "Interfaces/IHttpRequest.h"
 #include "Interfaces/IHttpResponse.h"
@@ -26,6 +27,21 @@ FString BuildURL(const FString& BaseURL, const FString& Endpoint)
 	}
 
 	return NormalizedBaseURL + TEXT("/") + Endpoint;
+}
+
+FString AppendQueryString(const FString& BaseURL, const FString& QueryString)
+{
+	if (QueryString.IsEmpty())
+	{
+		return BaseURL;
+	}
+
+	return BaseURL + (BaseURL.Contains(TEXT("?")) ? TEXT("&") : TEXT("?")) + QueryString;
+}
+
+FString UrlEncode(const FString& Value)
+{
+	return FGenericPlatformHttp::UrlEncode(Value);
 }
 
 FString MakeHttpErrorMessage(const FHttpResponsePtr& Response, bool bWasSuccessful)
@@ -68,6 +84,14 @@ void TryGetOptionalInt(const TSharedPtr<FJsonObject>& JsonObject, const TCHAR* F
 	}
 }
 
+void TryGetOptionalBool(const TSharedPtr<FJsonObject>& JsonObject, const TCHAR* FieldName, bool& OutValue)
+{
+	if (!JsonObject.IsValid() || !JsonObject->TryGetBoolField(FieldName, OutValue))
+	{
+		OutValue = false;
+	}
+}
+
 int32 GetStatusSortRank(EFriendStatus Status)
 {
 	switch (Status)
@@ -81,6 +105,33 @@ int32 GetStatusSortRank(EFriendStatus Status)
 		return 2;
 	}
 }
+
+FSocialFriend MakeConfiguredFriend(int32 UserID, const TCHAR* DisplayName)
+{
+	FSocialFriend Friend;
+	Friend.UserID = UserID;
+	Friend.DisplayName = DisplayName;
+	Friend.Status = EFriendStatus::Offline;
+	Friend.PartyID = 0;
+	return Friend;
+}
+}
+
+USocialSubsystem::USocialSubsystem()
+{
+	MockLocalUser.UserID = 1000;
+	MockLocalUser.DisplayName = TEXT("Zilla");
+	MockLocalUser.PartyID = 0;
+
+	MockFriends = {
+		MakeConfiguredFriend(1001, TEXT("Alex")),
+		MakeConfiguredFriend(1002, TEXT("Sam")),
+		MakeConfiguredFriend(1003, TEXT("Jamie")),
+		MakeConfiguredFriend(1004, TEXT("Morgan"))
+	};
+
+	LocalUser = MockLocalUser;
+	ResetFriendsToConfiguredList();
 }
 
 void USocialSubsystem::Initialize(FSubsystemCollectionBase& Collection)
@@ -88,6 +139,8 @@ void USocialSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	Super::Initialize(Collection);
 	UE_LOG(LogTemp, Log, TEXT("SocialSubsystem initialized"));
 
+	LocalUser = MockLocalUser;
+	ResetFriendsToConfiguredList();
 	ConnectWebSocket();
 }
 
@@ -111,8 +164,8 @@ void USocialSubsystem::SetServerURLs(const FString& InBaseHttpURL, const FString
 void USocialSubsystem::RefreshAll()
 {
 	RequestLocalUser();
-	RequestFriends();
-	RequestParties();
+	RequestAllFriendStatuses();
+	RequestAllParties();
 }
 
 void USocialSubsystem::ConnectWebSocket()
@@ -128,7 +181,7 @@ void USocialSubsystem::ConnectWebSocket()
 		WebSocket.Reset();
 	}
 
-	WebSocket = FWebSocketsModule::Get().CreateWebSocket(WebSocketURL);
+	WebSocket = FWebSocketsModule::Get().CreateWebSocket(AppendQueryString(WebSocketURL, BuildSessionQueryString()));
 	WebSocket->OnConnected().AddUObject(this, &USocialSubsystem::HandleWebSocketConnected);
 	WebSocket->OnConnectionError().AddUObject(this, &USocialSubsystem::HandleWebSocketConnectionError);
 	WebSocket->OnClosed().AddUObject(this, &USocialSubsystem::HandleWebSocketClosed);
@@ -159,46 +212,103 @@ bool USocialSubsystem::IsWebSocketConnected() const
 
 void USocialSubsystem::RequestLocalUser()
 {
-	SendGetRequest(TEXT("RequestLocalUser"), TEXT("/api/me"), [this](const FString& ResponseBody)
+	SendJsonPostRequest(TEXT("RequestLocalUser"), TEXT("/api/session/connect"), BuildSessionRequestBody(), [this](const FString& ResponseBody)
 	{
 		TSharedPtr<FJsonObject> JsonObject;
-		FSocialUser User;
-		if (!ParseJsonObjectString(ResponseBody, JsonObject) || !ParseLocalUser(JsonObject, User))
+		if (!ParseJsonObjectString(ResponseBody, JsonObject))
 		{
-			BroadcastRequestFailed(TEXT("RequestLocalUser"), TEXT("Could not parse the local user response."));
+			BroadcastRequestFailed(TEXT("RequestLocalUser"), TEXT("Could not parse the session response."));
 			return;
 		}
 
-		ApplyLocalUserUpdate(User);
+		ApplySessionSnapshot(JsonObject);
 	});
 }
 
 void USocialSubsystem::RequestFriends()
 {
-	SendGetRequest(TEXT("RequestFriends"), TEXT("/api/friends"), [this](const FString& ResponseBody)
-	{
-		TArray<FSocialFriend> ParsedFriends;
-		if (!ParseFriendsArray(ResponseBody, ParsedFriends))
-		{
-			BroadcastRequestFailed(TEXT("RequestFriends"), TEXT("Could not parse the friends response."));
-			return;
-		}
-
-		Friends = MoveTemp(ParsedFriends);
-		SortFriends();
-		OnFriendsUpdated.Broadcast();
-	});
+	RequestAllFriendStatuses();
 }
 
 void USocialSubsystem::RequestParties()
 {
-	SendGetRequest(TEXT("RequestParties"), TEXT("/api/parties"), [this](const FString& ResponseBody)
+	RequestAllParties();
+}
+
+void USocialSubsystem::RequestFriendStatus(int32 UserID)
+{
+	SendGetRequest(TEXT("RequestFriendStatus"), FString::Printf(TEXT("/api/users/%d/status"), UserID), [this](const FString& ResponseBody)
+	{
+		TSharedPtr<FJsonObject> JsonObject;
+		FSocialFriend Friend;
+		if (!ParseJsonObjectString(ResponseBody, JsonObject) || !ParseFriend(JsonObject, Friend))
+		{
+			BroadcastRequestFailed(TEXT("RequestFriendStatus"), TEXT("Could not parse the friend status response."));
+			return;
+		}
+
+		if (!IsConfiguredFriendID(Friend.UserID))
+		{
+			UE_LOG(LogTemp, Verbose, TEXT("Ignoring status for non-friend user %d"), Friend.UserID);
+			return;
+		}
+
+		ApplyFriendUpdate(Friend);
+		OnFriendStatusUpdated.Broadcast(Friend);
+	});
+}
+
+void USocialSubsystem::RequestAllFriendStatuses()
+{
+	const FString Endpoint = FString::Printf(
+		TEXT("/api/friends/online?userID=%d&displayName=%s&friendIDs=%s"),
+		MockLocalUser.UserID,
+		*UrlEncode(MockLocalUser.DisplayName),
+		*BuildFriendIDsQueryParam());
+
+	SendGetRequest(TEXT("RequestAllFriendStatuses"), Endpoint, [this](const FString& ResponseBody)
+	{
+		TArray<FSocialFriend> ParsedFriends;
+		if (!ParseFriendsArray(ResponseBody, ParsedFriends))
+		{
+			BroadcastRequestFailed(TEXT("RequestAllFriendStatuses"), TEXT("Could not parse the friends response."));
+			return;
+		}
+
+		ApplyFriendSnapshot(ParsedFriends);
+	});
+}
+
+void USocialSubsystem::RequestParty(int32 PartyID)
+{
+	SendGetRequest(TEXT("RequestParty"), FString::Printf(TEXT("/api/parties/%d"), PartyID), [this](const FString& ResponseBody)
+	{
+		TSharedPtr<FJsonObject> JsonObject;
+		FSocialParty Party;
+		if (!ParseJsonObjectString(ResponseBody, JsonObject) || !ParseParty(JsonObject, Party))
+		{
+			BroadcastRequestFailed(TEXT("RequestParty"), TEXT("Could not parse the party response."));
+			return;
+		}
+
+		ApplyPartyUpdate(Party);
+	});
+}
+
+void USocialSubsystem::RequestAllParties()
+{
+	SendGetRequest(TEXT("RequestAllParties"), TEXT("/api/parties"), [this](const FString& ResponseBody)
 	{
 		TArray<FSocialParty> ParsedParties;
 		if (!ParsePartiesArray(ResponseBody, ParsedParties))
 		{
-			BroadcastRequestFailed(TEXT("RequestParties"), TEXT("Could not parse the parties response."));
+			BroadcastRequestFailed(TEXT("RequestAllParties"), TEXT("Could not parse the parties response."));
 			return;
+		}
+
+		for (FSocialParty& Party : ParsedParties)
+		{
+			DecorateParty(Party);
 		}
 
 		Parties = MoveTemp(ParsedParties);
@@ -209,7 +319,8 @@ void USocialSubsystem::RequestParties()
 
 void USocialSubsystem::JoinParty(int32 PartyID)
 {
-	SendPostRequest(TEXT("JoinParty"), FString::Printf(TEXT("/api/parties/%d/join"), PartyID), [this, PartyID](const FString& ResponseBody)
+	const FString Endpoint = FString::Printf(TEXT("/api/parties/%d/join?userID=%d"), PartyID, MockLocalUser.UserID);
+	SendPostRequest(TEXT("JoinParty"), Endpoint, [this, PartyID](const FString& ResponseBody)
 	{
 		TSharedPtr<FJsonObject> JsonObject;
 		FSocialParty Party;
@@ -238,7 +349,8 @@ void USocialSubsystem::JoinParty(int32 PartyID)
 
 void USocialSubsystem::LeaveParty(int32 PartyID)
 {
-	SendPostRequest(TEXT("LeaveParty"), FString::Printf(TEXT("/api/parties/%d/leave"), PartyID), [this, PartyID](const FString& ResponseBody)
+	const FString Endpoint = FString::Printf(TEXT("/api/parties/%d/leave?userID=%d"), PartyID, MockLocalUser.UserID);
+	SendPostRequest(TEXT("LeaveParty"), Endpoint, [this, PartyID](const FString& ResponseBody)
 	{
 		TSharedPtr<FJsonObject> JsonObject;
 		FSocialParty Party;
@@ -279,29 +391,6 @@ void USocialSubsystem::LeaveCurrentParty()
 	LeaveParty(LocalUser.PartyID);
 }
 
-void USocialSubsystem::ToggleMockFriendPresence(int32 UserID)
-{
-	SendPostRequest(TEXT("ToggleMockFriendPresence"), FString::Printf(TEXT("/api/mock/friends/%d/toggle"), UserID), [this, UserID](const FString& ResponseBody)
-	{
-		TSharedPtr<FJsonObject> JsonObject;
-		FSocialFriend Friend;
-		if (!ParseJsonObjectString(ResponseBody, JsonObject) || !ParseFriend(JsonObject, Friend))
-		{
-			const FString ErrorMessage = TEXT("Could not parse the mock presence response.");
-			BroadcastRequestFailed(TEXT("ToggleMockFriendPresence"), ErrorMessage);
-			OnMockPresenceToggled.Broadcast(false, UserID, ErrorMessage);
-			return;
-		}
-
-		ApplyFriendUpdate(Friend);
-		OnMockPresenceToggled.Broadcast(true, Friend.UserID, FString());
-	},
-	[this, UserID](const FString& ErrorMessage)
-	{
-		OnMockPresenceToggled.Broadcast(false, UserID, ErrorMessage);
-	});
-}
-
 const TArray<FSocialFriend>& USocialSubsystem::GetFriends() const
 {
 	return Friends;
@@ -310,6 +399,11 @@ const TArray<FSocialFriend>& USocialSubsystem::GetFriends() const
 const TArray<FSocialParty>& USocialSubsystem::GetParties() const
 {
 	return Parties;
+}
+
+const TArray<FSocialFriend>& USocialSubsystem::GetConfiguredFriends() const
+{
+	return MockFriends;
 }
 
 FSocialUser USocialSubsystem::GetLocalUser() const
@@ -379,11 +473,26 @@ FString USocialSubsystem::GetFriendStatusText(EFriendStatus Status)
 	}
 }
 
+void USocialSubsystem::SetMockLocalUser(int32 UserID, const FString& DisplayName)
+{
+	MockLocalUser.UserID = UserID;
+	MockLocalUser.DisplayName = DisplayName;
+	LocalUser.UserID = UserID;
+	LocalUser.DisplayName = DisplayName;
+	OnLocalUserUpdated.Broadcast(LocalUser);
+}
+
+void USocialSubsystem::SetMockFriendList(const TArray<FSocialFriend>& InFriends)
+{
+	MockFriends = InFriends;
+	ResetFriendsToConfiguredList();
+	OnFriendsUpdated.Broadcast();
+}
+
 void USocialSubsystem::HandleWebSocketConnected()
 {
 	UE_LOG(LogTemp, Log, TEXT("WebSocket connected"));
 	OnConnectionChanged.Broadcast(true);
-	RefreshAll();
 }
 
 void USocialSubsystem::HandleWebSocketConnectionError(const FString& Error)
@@ -421,6 +530,12 @@ void USocialSubsystem::HandleWebSocketMessage(const FString& Message)
 	const TSharedPtr<FJsonObject>* DataObjectPtr = nullptr;
 	const TSharedPtr<FJsonObject> DataObject = RootObject->TryGetObjectField(TEXT("data"), DataObjectPtr) ? *DataObjectPtr : nullptr;
 
+	if (EventType.Equals(TEXT("session.snapshot"), ESearchCase::IgnoreCase))
+	{
+		ApplySessionSnapshot(DataObject);
+		return;
+	}
+
 	if (EventType.Equals(TEXT("friend.presence_changed"), ESearchCase::IgnoreCase))
 	{
 		FSocialFriend Friend;
@@ -430,7 +545,11 @@ void USocialSubsystem::HandleWebSocketMessage(const FString& Message)
 			return;
 		}
 
-		ApplyFriendUpdate(Friend);
+		if (IsConfiguredFriendID(Friend.UserID))
+		{
+			ApplyFriendUpdate(Friend);
+			OnFriendStatusUpdated.Broadcast(Friend);
+		}
 		return;
 	}
 
@@ -526,6 +645,36 @@ void USocialSubsystem::SendPostRequest(const FString& OperationName, const FStri
 	Request->ProcessRequest();
 }
 
+void USocialSubsystem::SendJsonPostRequest(const FString& OperationName, const FString& Endpoint, const FString& JsonBody, TFunction<void(const FString&)> OnSuccess)
+{
+	TSharedRef<IHttpRequest, ESPMode::ThreadSafe> Request = FHttpModule::Get().CreateRequest();
+	Request->SetVerb(TEXT("POST"));
+	Request->SetURL(BuildURL(BaseHttpURL, Endpoint));
+	Request->SetHeader(TEXT("Accept"), TEXT("application/json"));
+	Request->SetHeader(TEXT("Content-Type"), TEXT("application/json"));
+	Request->SetContentAsString(JsonBody);
+
+	TWeakObjectPtr<USocialSubsystem> WeakThis(this);
+	Request->OnProcessRequestComplete().BindLambda([WeakThis, OperationName, OnSuccess](FHttpRequestPtr RequestPtr, FHttpResponsePtr Response, bool bWasSuccessful)
+	{
+		USocialSubsystem* StrongThis = WeakThis.Get();
+		if (!StrongThis)
+		{
+			return;
+		}
+
+		if (!bWasSuccessful || !Response.IsValid() || Response->GetResponseCode() < 200 || Response->GetResponseCode() >= 300)
+		{
+			StrongThis->BroadcastRequestFailed(OperationName, MakeHttpErrorMessage(Response, bWasSuccessful));
+			return;
+		}
+
+		OnSuccess(Response->GetContentAsString());
+	});
+
+	Request->ProcessRequest();
+}
+
 void USocialSubsystem::BroadcastRequestFailed(const FString& OperationName, const FString& ErrorMessage)
 {
 	UE_LOG(LogTemp, Warning, TEXT("%s failed: %s"), *OperationName, *ErrorMessage);
@@ -568,8 +717,22 @@ bool USocialSubsystem::ParseFriend(const TSharedPtr<FJsonObject>& JsonObject, FS
 
 bool USocialSubsystem::ParsePartyMember(const TSharedPtr<FJsonObject>& JsonObject, FPartyMember& OutMember) const
 {
-	return TryGetRequiredInt(JsonObject, TEXT("userID"), OutMember.UserID)
-		&& TryGetRequiredString(JsonObject, TEXT("displayName"), OutMember.DisplayName);
+	if (!TryGetRequiredInt(JsonObject, TEXT("userID"), OutMember.UserID))
+	{
+		return false;
+	}
+
+	if (!TryGetRequiredString(JsonObject, TEXT("displayName"), OutMember.DisplayName))
+	{
+		return false;
+	}
+
+	FString Status;
+	OutMember.Status = JsonObject->TryGetStringField(TEXT("status"), Status) ? ParseFriendStatus(Status) : EFriendStatus::Offline;
+	TryGetOptionalInt(JsonObject, TEXT("partyID"), OutMember.PartyID);
+	TryGetOptionalBool(JsonObject, TEXT("isFriend"), OutMember.bIsFriend);
+	TryGetOptionalBool(JsonObject, TEXT("isLocalUser"), OutMember.bIsLocalUser);
+	return true;
 }
 
 bool USocialSubsystem::ParseParty(const TSharedPtr<FJsonObject>& JsonObject, FSocialParty& OutParty) const
@@ -615,6 +778,7 @@ bool USocialSubsystem::ParseParty(const TSharedPtr<FJsonObject>& JsonObject, FSo
 		}
 	}
 
+	DecorateParty(OutParty);
 	return true;
 }
 
@@ -672,6 +836,84 @@ bool USocialSubsystem::ParseJsonObjectString(const FString& JsonString, TSharedP
 	return FJsonSerializer::Deserialize(Reader, OutObject) && OutObject.IsValid();
 }
 
+bool USocialSubsystem::ParseFriendsField(const TSharedPtr<FJsonObject>& JsonObject, const TCHAR* FieldName, TArray<FSocialFriend>& OutFriends) const
+{
+	const TArray<TSharedPtr<FJsonValue>>* JsonArray = nullptr;
+	if (!JsonObject.IsValid() || !JsonObject->TryGetArrayField(FieldName, JsonArray))
+	{
+		return false;
+	}
+
+	OutFriends.Reset(JsonArray->Num());
+	for (const TSharedPtr<FJsonValue>& JsonValue : *JsonArray)
+	{
+		FSocialFriend Friend;
+		if (!ParseFriend(JsonValue.IsValid() ? JsonValue->AsObject() : nullptr, Friend))
+		{
+			return false;
+		}
+		OutFriends.Add(Friend);
+	}
+
+	return true;
+}
+
+bool USocialSubsystem::ParsePartiesField(const TSharedPtr<FJsonObject>& JsonObject, const TCHAR* FieldName, TArray<FSocialParty>& OutParties) const
+{
+	const TArray<TSharedPtr<FJsonValue>>* JsonArray = nullptr;
+	if (!JsonObject.IsValid() || !JsonObject->TryGetArrayField(FieldName, JsonArray))
+	{
+		return false;
+	}
+
+	OutParties.Reset(JsonArray->Num());
+	for (const TSharedPtr<FJsonValue>& JsonValue : *JsonArray)
+	{
+		FSocialParty Party;
+		if (!ParseParty(JsonValue.IsValid() ? JsonValue->AsObject() : nullptr, Party))
+		{
+			return false;
+		}
+		OutParties.Add(Party);
+	}
+
+	return true;
+}
+
+void USocialSubsystem::ApplySessionSnapshot(const TSharedPtr<FJsonObject>& JsonObject)
+{
+	if (!JsonObject.IsValid())
+	{
+		BroadcastRequestFailed(TEXT("SessionSnapshot"), TEXT("Session snapshot was empty."));
+		return;
+	}
+
+	const TSharedPtr<FJsonObject>* LocalUserObjectPtr = nullptr;
+	if (JsonObject->TryGetObjectField(TEXT("localUser"), LocalUserObjectPtr))
+	{
+		FSocialUser User;
+		if (ParseLocalUser(*LocalUserObjectPtr, User))
+		{
+			ApplyLocalUserUpdate(User);
+		}
+	}
+
+	TArray<FSocialFriend> SnapshotFriends;
+	if (ParseFriendsField(JsonObject, TEXT("onlineFriends"), SnapshotFriends)
+		|| ParseFriendsField(JsonObject, TEXT("friends"), SnapshotFriends))
+	{
+		ApplyFriendSnapshot(SnapshotFriends);
+	}
+
+	TArray<FSocialParty> SnapshotParties;
+	if (ParsePartiesField(JsonObject, TEXT("parties"), SnapshotParties))
+	{
+		Parties = MoveTemp(SnapshotParties);
+		SortParties();
+		OnPartiesUpdated.Broadcast();
+	}
+}
+
 void USocialSubsystem::ApplyLocalUserUpdate(const FSocialUser& User)
 {
 	const int32 PreviousPartyID = LocalUser.PartyID;
@@ -684,40 +926,97 @@ void USocialSubsystem::ApplyLocalUserUpdate(const FSocialUser& User)
 	}
 }
 
+void USocialSubsystem::ApplyFriendSnapshot(const TArray<FSocialFriend>& SnapshotFriends)
+{
+	ResetFriendsToConfiguredList();
+
+	for (const FSocialFriend& Friend : SnapshotFriends)
+	{
+		bool bUpdatedExistingFriend = false;
+		for (FSocialFriend& ExistingFriend : Friends)
+		{
+			if (ExistingFriend.UserID == Friend.UserID)
+			{
+				const FString DisplayName = ExistingFriend.DisplayName.IsEmpty() ? Friend.DisplayName : ExistingFriend.DisplayName;
+				ExistingFriend = Friend;
+				ExistingFriend.DisplayName = DisplayName;
+				bUpdatedExistingFriend = true;
+				break;
+			}
+		}
+
+		if (!bUpdatedExistingFriend && IsConfiguredFriendID(Friend.UserID))
+		{
+			Friends.Add(Friend);
+		}
+	}
+
+	SortFriends();
+	OnFriendsUpdated.Broadcast();
+}
+
 void USocialSubsystem::ApplyFriendUpdate(const FSocialFriend& Friend)
 {
 	for (FSocialFriend& ExistingFriend : Friends)
 	{
 		if (ExistingFriend.UserID == Friend.UserID)
 		{
+			const FString DisplayName = ExistingFriend.DisplayName.IsEmpty() ? Friend.DisplayName : ExistingFriend.DisplayName;
 			ExistingFriend = Friend;
+			ExistingFriend.DisplayName = DisplayName;
 			SortFriends();
 			OnFriendsUpdated.Broadcast();
 			return;
 		}
 	}
 
-	Friends.Add(Friend);
-	SortFriends();
-	OnFriendsUpdated.Broadcast();
+	if (IsConfiguredFriendID(Friend.UserID))
+	{
+		Friends.Add(Friend);
+		SortFriends();
+		OnFriendsUpdated.Broadcast();
+	}
 }
 
 void USocialSubsystem::ApplyPartyUpdate(const FSocialParty& Party)
 {
+	FSocialParty DecoratedParty = Party;
+	DecorateParty(DecoratedParty);
+
 	for (FSocialParty& ExistingParty : Parties)
 	{
-		if (ExistingParty.PartyID == Party.PartyID)
+		if (ExistingParty.PartyID == DecoratedParty.PartyID)
 		{
-			ExistingParty = Party;
+			ExistingParty = DecoratedParty;
 			SortParties();
 			OnPartiesUpdated.Broadcast();
 			return;
 		}
 	}
 
-	Parties.Add(Party);
+	Parties.Add(DecoratedParty);
 	SortParties();
 	OnPartiesUpdated.Broadcast();
+}
+
+void USocialSubsystem::ResetFriendsToConfiguredList()
+{
+	Friends = MockFriends;
+	for (FSocialFriend& Friend : Friends)
+	{
+		Friend.Status = EFriendStatus::Offline;
+		Friend.PartyID = 0;
+	}
+	SortFriends();
+}
+
+void USocialSubsystem::DecorateParty(FSocialParty& Party) const
+{
+	for (FPartyMember& Member : Party.Members)
+	{
+		Member.bIsLocalUser = Member.UserID == LocalUser.UserID || Member.UserID == MockLocalUser.UserID;
+		Member.bIsFriend = IsConfiguredFriendID(Member.UserID);
+	}
 }
 
 void USocialSubsystem::SortFriends()
@@ -768,4 +1067,61 @@ EFriendStatus USocialSubsystem::ParseFriendStatus(const FString& Status)
 	}
 
 	return EFriendStatus::Offline;
+}
+
+bool USocialSubsystem::IsConfiguredFriendID(int32 UserID) const
+{
+	for (const FSocialFriend& Friend : MockFriends)
+	{
+		if (Friend.UserID == UserID)
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+FString USocialSubsystem::BuildSessionQueryString() const
+{
+	return FString::Printf(
+		TEXT("userID=%d&displayName=%s&friendIDs=%s"),
+		MockLocalUser.UserID,
+		*UrlEncode(MockLocalUser.DisplayName),
+		*BuildFriendIDsQueryParam());
+}
+
+FString USocialSubsystem::BuildSessionRequestBody() const
+{
+	FString FriendIDsJson;
+	for (int32 Index = 0; Index < MockFriends.Num(); ++Index)
+	{
+		if (Index > 0)
+		{
+			FriendIDsJson += TEXT(",");
+		}
+		FriendIDsJson += FString::FromInt(MockFriends[Index].UserID);
+	}
+
+	return FString::Printf(
+		TEXT("{\"localUser\":{\"userID\":%d,\"displayName\":\"%s\",\"partyID\":%d},\"friendIDs\":[%s]}"),
+		MockLocalUser.UserID,
+		*MockLocalUser.DisplayName.ReplaceCharWithEscapedChar(),
+		MockLocalUser.PartyID,
+		*FriendIDsJson);
+}
+
+FString USocialSubsystem::BuildFriendIDsQueryParam() const
+{
+	FString Result;
+	for (int32 Index = 0; Index < MockFriends.Num(); ++Index)
+	{
+		if (Index > 0)
+		{
+			Result += TEXT(",");
+		}
+		Result += FString::FromInt(MockFriends[Index].UserID);
+	}
+
+	return Result;
 }

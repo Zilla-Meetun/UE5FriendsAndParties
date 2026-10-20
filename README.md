@@ -7,7 +7,7 @@ The project uses a small local Go mock service instead of a real platform backen
 ## What This Demonstrates
 
 - A Blueprint-friendly `USocialSubsystem` for social data.
-- HTTP requests for local user, friends, parties, join, leave, and mock debug actions.
+- HTTP requests for local session state, friend status checks, active parties, join, and leave.
 - WebSocket updates for friend presence, party updates, and current-party changes.
 - UMG widgets that can be populated from cached subsystem data.
 - A showcase `GameMode` and `PlayerController` that can boot directly into the social UI.
@@ -45,15 +45,19 @@ The service runs at:
 - HTTP: `http://localhost:8080`
 - WebSocket: `ws://localhost:8080/ws`
 
-Useful test calls:
+Useful test calls from PowerShell:
 
 ```powershell
-curl http://localhost:8080/api/me
-curl http://localhost:8080/api/friends
-curl http://localhost:8080/api/parties
-curl -X POST http://localhost:8080/api/mock/friends/1001/toggle
-curl -X POST http://localhost:8080/api/parties/2001/join
-curl -X POST http://localhost:8080/api/parties/2001/leave
+$body = '{"localUser":{"userID":1000,"displayName":"Zilla"},"friendIDs":[1001,1002,1003,1004]}'
+Invoke-RestMethod -Method Post "http://localhost:8080/api/session/connect" -ContentType "application/json" -Body $body
+Invoke-RestMethod "http://localhost:8080/api/friends/online?userID=1000&displayName=Zilla&friendIDs=1001,1002,1003,1004"
+Invoke-RestMethod "http://localhost:8080/api/users/1001/status"
+Invoke-RestMethod "http://localhost:8080/api/parties"
+Invoke-RestMethod "http://localhost:8080/api/parties/2002"
+Invoke-RestMethod -Method Post "http://localhost:8080/api/mock/users/1001/logout"
+Invoke-RestMethod -Method Post "http://localhost:8080/api/mock/users/1001/login?status=online"
+Invoke-RestMethod -Method Post "http://localhost:8080/api/parties/2001/join?userID=1000"
+Invoke-RestMethod -Method Post "http://localhost:8080/api/parties/2001/leave?userID=1000"
 ```
 
 ## Run The Unreal Project
@@ -113,7 +117,7 @@ Bind these events:
 - `OnCurrentPartyChanged`
 - `OnConnectionChanged`
 - `OnPartyActionCompleted`
-- `OnMockPresenceToggled`
+- `OnFriendStatusUpdated`
 - `OnRequestFailed`
 
 If your widget is spawned by `SocialShowcasePlayerController`, the controller already calls `ConnectWebSocket` and `RefreshAll` after creating the widget. If you use the widget somewhere else, call those nodes yourself after binding events.
@@ -133,7 +137,15 @@ Useful fields:
 - `Status`
 - `PartyID`
 
-Use `GetFriendStatusText` to display the enum as text. For a demo/debug button, call `ToggleMockFriendPresence(UserID)`. The mock users include Alex at user ID `1001`.
+Useful friend nodes:
+
+- `GetConfiguredFriends`: the static Unreal-side friend list used when connecting to the service.
+- `RequestFriendStatus(UserID)`: request one user's current status.
+- `RequestAllFriendStatuses`: ask the mock service which configured friends are online, then mark everyone else offline locally.
+- `GetFriendByUserID`: read one cached friend row after a request or WebSocket update.
+- `GetFriendStatusText`: display the enum as text.
+
+Do not drive presence from Unreal for the showcase UI. Use Postman, curl, or a small external script against `POST /api/mock/users/{userID}/login` and `POST /api/mock/users/{userID}/logout`; Unreal should only receive and display the updates.
 
 ### Party UI
 
@@ -152,6 +164,13 @@ Useful fields:
 - `MaxSize`
 
 A join button should call `JoinParty(PartyID)`. The mock service starts with Alex's party at party ID `2001`.
+
+Useful party nodes:
+
+- `RequestParty(PartyID)`: request one active party.
+- `RequestAllParties`: request the active party list.
+- `GetPartyByID`: read one cached party by ID.
+- `GetCurrentParty`: read the party the local user is currently in.
 
 ### Current Party UI
 
@@ -179,12 +198,15 @@ The mock service starts with:
 
 - Local user: `Zilla` with user ID `1000`
 - Friends: Alex `1001`, Sam `1002`, Jamie `1003`, Morgan `1004`
-- Parties: Alex's Party `2001`, Sam's Party `2002`
+- Non-friends: Casey `1005`, Riley `1006`, Taylor `1007`, Jordan `1008`
+- Parties: All Friends Party `2001`, Mixed Friends Party `2002`, No Friends Party `2003`
 
-Calling the mock presence endpoint cycles a friend's status:
+Presence is updated externally:
 
 ```text
-offline -> online -> in_game -> offline
+POST /api/mock/users/1001/logout
+POST /api/mock/users/1001/login?status=online
+POST /api/mock/users/1002/login?status=in_game
 ```
 
 ## Notes

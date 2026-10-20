@@ -33,11 +33,12 @@ void ASocialShowcasePlayerController::BeginPlay()
 		{
 			if (USocialSubsystem* SocialSubsystem = GameInstance->GetSubsystem<USocialSubsystem>())
 			{
-				SocialSubsystem->ConnectWebSocket();
-				SocialSubsystem->RefreshAll();
+				//SocialSubsystem->ConnectWebSocket();
+				//SocialSubsystem->RefreshAll();
 			}
 		}
 	}
+	
 }
 
 void ASocialShowcasePlayerController::ShowSocialMenu()

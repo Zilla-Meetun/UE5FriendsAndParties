@@ -15,16 +15,16 @@ struct FSocialFriend
 {
 	GENERATED_BODY()
 
-	UPROPERTY(BlueprintReadOnly, Category = "Social")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Social")
 	int32 UserID = 0;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Social")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Social")
 	FString DisplayName;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Social")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Social")
 	EFriendStatus Status = EFriendStatus::Offline;
 	
-	UPROPERTY(BlueprintReadOnly, Category = "Social")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Social")
 	int32 PartyID = 0;
 	
 };
@@ -34,11 +34,23 @@ struct FPartyMember
 {
 	GENERATED_BODY()
 
-	UPROPERTY(BlueprintReadOnly, Category = "Social")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Social")
 	int32 UserID = 0;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Social")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Social")
 	FString DisplayName;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Social")
+	EFriendStatus Status = EFriendStatus::Offline;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Social")
+	int32 PartyID = 0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Social")
+	bool bIsFriend = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Social")
+	bool bIsLocalUser = false;
 };
 
 USTRUCT(BlueprintType)
@@ -46,22 +58,22 @@ struct FSocialParty
 {
 	GENERATED_BODY()
 
-	UPROPERTY(BlueprintReadOnly, Category = "Social")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Social")
 	int32 PartyID = 0;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Social")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Social")
 	FString Name;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Social")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Social")
 	int32 LeaderUserID = 0;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Social")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Social")
 	FString LeaderDisplayName;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Social")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Social")
 	TArray<FPartyMember> Members;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Social")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Social")
 	int32 MaxSize = 0;
 };
 
@@ -70,12 +82,12 @@ struct FSocialUser
 {
 	GENERATED_BODY()
 
-	UPROPERTY(BlueprintReadOnly, Category = "Social")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Social")
 	int32 UserID = 0;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Social")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Social")
 	FString DisplayName;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Social")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Social")
 	int32 PartyID = 0;
 };

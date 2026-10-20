@@ -2,15 +2,14 @@
 
 A small local Go backend for the Unreal Engine **Friends & Parties** portfolio showcase.
 
-It provides:
+The service deliberately behaves like a simple social backend:
 
-- Mock local-user data
-- Mock friends and presence/status data
-- Mock active parties
-- REST endpoints for initial state
-- WebSocket broadcasts for live updates
-- Join/leave party actions
-- A mock presence-toggle endpoint for demonstrating live UI updates
+- Unreal connects as a local user and supplies its configured friend IDs.
+- The service marks that local user online for the session.
+- HTTP endpoints return one user status, all configured friend statuses, online friends, one party, or all active parties.
+- WebSocket clients receive an initial `session.snapshot`.
+- External mock requests can log users in or out, and connected clients only receive presence events for users in their supplied friend list.
+- Parties contain an all-friends example, a mixed friend/non-friend example, and a no-friends example.
 
 ## Requirements
 
@@ -31,86 +30,180 @@ The service runs at:
 - HTTP: `http://localhost:8080`
 - WebSocket: `ws://localhost:8080/ws`
 
-## REST endpoints
+## Demo Data
 
-### Local user
+Local demo user:
 
-```http
-GET /api/me
+```text
+1000 Zilla
 ```
 
-Example:
+Default friends supplied by Unreal:
+
+```text
+1001 Alex    online, in All Friends Party
+1002 Sam     in_game, in Mixed Friends Party
+1003 Jamie   offline
+1004 Morgan  online, in All Friends Party
+```
+
+Non-friend users:
+
+```text
+1005 Casey   online, in Mixed Friends Party
+1006 Riley   in_game, in No Friends Party
+1007 Taylor  online, in No Friends Party
+1008 Jordan  offline
+```
+
+Active parties:
+
+```text
+2001 All Friends Party
+2002 Mixed Friends Party
+2003 No Friends Party
+```
+
+## Session Contract
+
+Unreal should connect with a local user and a static friend ID list. The C++ subsystem sends this automatically, but this is the raw request shape:
+
+```http
+POST /api/session/connect
+Content-Type: application/json
+```
 
 ```json
 {
-  "userID": 1000,
-  "displayName": "Zilla",
-  "partyID": 0
+  "localUser": {
+    "userID": 1000,
+    "displayName": "Zilla"
+  },
+  "friendIDs": [1001, 1002, 1003, 1004]
 }
 ```
 
-### Friends
-
-```http
-GET /api/friends
-```
-
-Example:
+The response includes the local user, every supplied friend with status, only online friends, and all active parties:
 
 ```json
-[
-  {
-    "userID": 1001,
-    "displayName": "Alex",
-    "status": "online",
-    "partyID": 2001
-  }
-]
+{
+  "localUser": {
+    "userID": 1000,
+    "displayName": "Zilla"
+  },
+  "friends": [],
+  "onlineFriends": [],
+  "parties": []
+}
 ```
 
-### Active parties
+## REST Endpoints
+
+### Connect A Session
+
+```http
+POST /api/session/connect
+```
+
+### Local User
+
+```http
+GET /api/me?userID=1000&displayName=Zilla&friendIDs=1001,1002,1003,1004
+```
+
+### All Known Users
+
+```http
+GET /api/users
+```
+
+### Single User Status
+
+```http
+GET /api/users/1001/status
+```
+
+### All Configured Friend Statuses
+
+```http
+GET /api/friends?userID=1000&displayName=Zilla&friendIDs=1001,1002,1003,1004
+```
+
+### Online Configured Friends
+
+```http
+GET /api/friends/online?userID=1000&displayName=Zilla&friendIDs=1001,1002,1003,1004
+```
+
+### Active Parties
 
 ```http
 GET /api/parties
 ```
 
-### Join a party
+### Single Active Party
 
 ```http
-POST /api/parties/2001/join
+GET /api/parties/2002
 ```
 
-### Leave a party
+### Join A Party
 
 ```http
-POST /api/parties/2001/leave
+POST /api/parties/2001/join?userID=1000
 ```
 
-### Toggle a friend's presence
-
-This is a showcase/debug endpoint that simulates a platform presence update.
+### Leave A Party
 
 ```http
-POST /api/mock/friends/1001/toggle
+POST /api/parties/2001/leave?userID=1000
 ```
 
-Each call cycles:
+### Mock User Login
 
-```text
-offline -> online -> in_game -> offline
+```http
+POST /api/mock/users/1001/login?status=online
+POST /api/mock/users/1002/login?status=in_game
 ```
 
-A successful change is also broadcast to connected WebSocket clients.
+### Mock User Logout
+
+```http
+POST /api/mock/users/1001/logout
+```
+
+Logout sets that user offline, removes them from their party if needed, and broadcasts the update to WebSocket clients that listed that user as a friend.
 
 ## WebSocket
 
-Connect to:
+Connect with the same session context:
 
 ```text
-ws://localhost:8080/ws
+ws://localhost:8080/ws?userID=1000&displayName=Zilla&friendIDs=1001,1002,1003,1004
 ```
 
-### Presence event
+### Session Snapshot
+
+Sent immediately after connection:
+
+```json
+{
+  "type": "session.snapshot",
+  "data": {
+    "localUser": {
+      "userID": 1000,
+      "displayName": "Zilla"
+    },
+    "friends": [],
+    "onlineFriends": [],
+    "parties": []
+  }
+}
+```
+
+### Friend Presence Event
+
+Sent only when the changed user is in the connected client's friend list:
 
 ```json
 {
@@ -118,38 +211,28 @@ ws://localhost:8080/ws
   "data": {
     "userID": 1001,
     "displayName": "Alex",
-    "status": "in_game",
-    "partyID": 2001
+    "status": "offline"
   }
 }
 ```
 
-### Party update
+### Party Update
 
 ```json
 {
   "type": "party.updated",
   "data": {
     "partyID": 2001,
-    "name": "Alex's Party",
+    "name": "All Friends Party",
     "leaderUserID": 1001,
     "leaderDisplayName": "Alex",
-    "members": [
-      {
-        "userID": 1001,
-        "displayName": "Alex"
-      },
-      {
-        "userID": 1000,
-        "displayName": "Zilla"
-      }
-    ],
+    "members": [],
     "maxSize": 4
   }
 }
 ```
 
-### Local-user party change
+### Local-User Party Change
 
 ```json
 {
@@ -171,49 +254,33 @@ When leaving:
 }
 ```
 
-## Useful test commands
+## Useful Test Commands
 
-Get friends:
+PowerShell examples:
 
-```bash
-curl http://localhost:8080/api/friends
+```powershell
+$body = '{"localUser":{"userID":1000,"displayName":"Zilla"},"friendIDs":[1001,1002,1003,1004]}'
+Invoke-RestMethod -Method Post "http://localhost:8080/api/session/connect" -ContentType "application/json" -Body $body
+Invoke-RestMethod "http://localhost:8080/api/friends/online?userID=1000&displayName=Zilla&friendIDs=1001,1002,1003,1004"
+Invoke-RestMethod "http://localhost:8080/api/users/1001/status"
+Invoke-RestMethod "http://localhost:8080/api/parties"
+Invoke-RestMethod "http://localhost:8080/api/parties/2003"
+Invoke-RestMethod -Method Post "http://localhost:8080/api/mock/users/1001/logout"
+Invoke-RestMethod -Method Post "http://localhost:8080/api/mock/users/1001/login?status=online"
 ```
 
-Get parties:
-
-```bash
-curl http://localhost:8080/api/parties
-```
-
-Toggle Alex's presence:
-
-```bash
-curl -X POST http://localhost:8080/api/mock/friends/1001/toggle
-```
-
-Join Alex's party:
-
-```bash
-curl -X POST http://localhost:8080/api/parties/2001/join
-```
-
-Leave Alex's party:
-
-```bash
-curl -X POST http://localhost:8080/api/parties/2001/leave
-```
-
-## Suggested Unreal integration order
+## Suggested Unreal Integration Order
 
 1. Start the mock server with `go run .`.
 2. In a widget, get the Game Instance subsystem `SocialSubsystem`.
-3. Bind `OnFriendsUpdated`, `OnPartiesUpdated`, `OnLocalUserUpdated`, `OnCurrentPartyChanged`, `OnPartyActionCompleted`, and `OnRequestFailed`.
+3. Bind `OnFriendsUpdated`, `OnFriendStatusUpdated`, `OnPartiesUpdated`, `OnLocalUserUpdated`, `OnCurrentPartyChanged`, `OnPartyActionCompleted`, and `OnRequestFailed`.
 4. Call `ConnectWebSocket` and `RefreshAll` when the social menu opens.
-5. Populate `WBP_Friends` from `GetFriends`.
-6. Populate `WBP_Parties` from `GetParties`.
-7. Use `JoinParty`, `LeaveParty`, or `LeaveCurrentParty` from button clicks.
-8. Use `ToggleMockFriendPresence` for a showcase/debug button that demonstrates live presence updates.
+5. Populate `WBP_FriendsList` from `GetFriends`.
+6. Populate `WBP_PartyList` from `GetParties`.
+7. Use `RequestFriendStatus`, `RequestAllFriendStatuses`, `RequestParty`, or `RequestAllParties` for manual refresh buttons or startup refreshes.
+8. Use `JoinParty`, `LeaveParty`, or `LeaveCurrentParty` from button clicks.
+9. Use Postman or an external script with the mock login/logout endpoints to demonstrate live presence changes.
 
-## Portfolio note
+## Portfolio Note
 
 This project is intentionally a simplified personal mock of an integration pattern used professionally. It should not contain proprietary source code, credentials, assets, or company-specific implementation details.

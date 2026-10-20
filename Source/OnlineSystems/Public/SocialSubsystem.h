@@ -16,9 +16,9 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnPartiesUpdated);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnCurrentPartyChanged);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnSocialConnectionChanged, bool, bConnected);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnLocalUserUpdated, FSocialUser, LocalUser);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnFriendStatusUpdated, FSocialFriend, Friend);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnSocialRequestFailed, FString, Operation, FString, ErrorMessage);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnPartyActionCompleted, bool, bSuccess, int32, PartyID, FString, ErrorMessage);
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnMockPresenceToggled, bool, bSuccess, int32, UserID, FString, ErrorMessage);
 
 UCLASS(BlueprintType, Blueprintable)
 class ONLINESYSTEMS_API USocialSubsystem : public UGameInstanceSubsystem
@@ -26,6 +26,8 @@ class ONLINESYSTEMS_API USocialSubsystem : public UGameInstanceSubsystem
 	GENERATED_BODY()
 	
 public:
+	USocialSubsystem();
+
 	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
 	virtual void Deinitialize() override;
 
@@ -53,6 +55,18 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Social")
 	void RequestParties();
 
+	UFUNCTION(BlueprintCallable, Category = "Social|Presence")
+	void RequestFriendStatus(int32 UserID);
+
+	UFUNCTION(BlueprintCallable, Category = "Social|Presence")
+	void RequestAllFriendStatuses();
+
+	UFUNCTION(BlueprintCallable, Category = "Social|Parties")
+	void RequestParty(int32 PartyID);
+
+	UFUNCTION(BlueprintCallable, Category = "Social|Parties")
+	void RequestAllParties();
+
 	UFUNCTION(BlueprintCallable, Category = "Social|Actions")
 	void JoinParty(int32 PartyID);
 
@@ -62,14 +76,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Social|Actions")
 	void LeaveCurrentParty();
 
-	UFUNCTION(BlueprintCallable, Category = "Social|Debug")
-	void ToggleMockFriendPresence(int32 UserID);
-	
 	UFUNCTION(BlueprintPure, Category = "Social")
 	const TArray<FSocialFriend>& GetFriends() const;
 	
 	UFUNCTION(BlueprintPure, Category = "Social")
 	const TArray<FSocialParty>& GetParties() const;
+
+	UFUNCTION(BlueprintPure, Category = "Social")
+	const TArray<FSocialFriend>& GetConfiguredFriends() const;
 
 	UFUNCTION(BlueprintPure, Category = "Social")
 	FSocialUser GetLocalUser() const;
@@ -91,6 +105,12 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Social")
 	static FString GetFriendStatusText(EFriendStatus Status);
+
+	UFUNCTION(BlueprintCallable, Category = "Social|Mock Client")
+	void SetMockLocalUser(int32 UserID, const FString& DisplayName);
+
+	UFUNCTION(BlueprintCallable, Category = "Social|Mock Client")
+	void SetMockFriendList(const TArray<FSocialFriend>& InFriends);
 	
 	UPROPERTY(BlueprintAssignable, Category = "Social")
 	FOnFriendsUpdated OnFriendsUpdated;
@@ -108,13 +128,13 @@ public:
 	FOnLocalUserUpdated OnLocalUserUpdated;
 
 	UPROPERTY(BlueprintAssignable, Category = "Social")
+	FOnFriendStatusUpdated OnFriendStatusUpdated;
+
+	UPROPERTY(BlueprintAssignable, Category = "Social")
 	FOnSocialRequestFailed OnRequestFailed;
 
 	UPROPERTY(BlueprintAssignable, Category = "Social")
 	FOnPartyActionCompleted OnPartyActionCompleted;
-
-	UPROPERTY(BlueprintAssignable, Category = "Social")
-	FOnMockPresenceToggled OnMockPresenceToggled;
 	
 private:
 	void HandleWebSocketConnected();
@@ -124,6 +144,7 @@ private:
 
 	void SendGetRequest(const FString& OperationName, const FString& Endpoint, TFunction<void(const FString&)> OnSuccess);
 	void SendPostRequest(const FString& OperationName, const FString& Endpoint, TFunction<void(const FString&)> OnSuccess, TFunction<void(const FString&)> OnFailure);
+	void SendJsonPostRequest(const FString& OperationName, const FString& Endpoint, const FString& JsonBody, TFunction<void(const FString&)> OnSuccess);
 	void BroadcastRequestFailed(const FString& OperationName, const FString& ErrorMessage);
 	
 	bool ParseLocalUser(const TSharedPtr<FJsonObject>& JsonObject, FSocialUser& OutUser) const;
@@ -133,13 +154,23 @@ private:
 	bool ParseFriendsArray(const FString& JsonString, TArray<FSocialFriend>& OutFriends) const;
 	bool ParsePartiesArray(const FString& JsonString, TArray<FSocialParty>& OutParties) const;
 	bool ParseJsonObjectString(const FString& JsonString, TSharedPtr<FJsonObject>& OutObject) const;
+	bool ParseFriendsField(const TSharedPtr<FJsonObject>& JsonObject, const TCHAR* FieldName, TArray<FSocialFriend>& OutFriends) const;
+	bool ParsePartiesField(const TSharedPtr<FJsonObject>& JsonObject, const TCHAR* FieldName, TArray<FSocialParty>& OutParties) const;
 
+	void ApplySessionSnapshot(const TSharedPtr<FJsonObject>& JsonObject);
 	void ApplyLocalUserUpdate(const FSocialUser& User);
+	void ApplyFriendSnapshot(const TArray<FSocialFriend>& SnapshotFriends);
 	void ApplyFriendUpdate(const FSocialFriend& Friend);
 	void ApplyPartyUpdate(const FSocialParty& Party);
+	void ResetFriendsToConfiguredList();
+	void DecorateParty(FSocialParty& Party) const;
 	void SortFriends();
 	void SortParties();
 	static EFriendStatus ParseFriendStatus(const FString& Status);
+	bool IsConfiguredFriendID(int32 UserID) const;
+	FString BuildSessionQueryString() const;
+	FString BuildSessionRequestBody() const;
+	FString BuildFriendIDsQueryParam() const;
 
 private:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Social|Config", meta = (AllowPrivateAccess = "true"))
@@ -147,6 +178,12 @@ private:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Social|Config", meta = (AllowPrivateAccess = "true"))
 	FString WebSocketURL = TEXT("ws://localhost:8080/ws");
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Social|Mock Client", meta = (AllowPrivateAccess = "true"))
+	FSocialUser MockLocalUser;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Social|Mock Client", meta = (AllowPrivateAccess = "true"))
+	TArray<FSocialFriend> MockFriends;
 
 	TArray<FSocialFriend> Friends;
 	TArray<FSocialParty> Parties;
