@@ -32,6 +32,14 @@ The service runs at:
 
 ## Demo Data
 
+Automatic live activity starts on the first WebSocket connection after each server restart:
+
+- Robin (`1013`) starts online with no party and goes offline after 20 seconds, once per run.
+- Cameron (`1014`), a non-friend, joins Ranked Warmup (`2002`) after 30 seconds, leaves at 60 seconds, and continues alternating every 30 seconds. If the party is full, joining is skipped and retried on the next tick.
+- Unreal's default configured friend list includes Robin. Recompile the Unreal C++ module to pick up this new default; if a Blueprint supplies its own friend list, add Robin there too.
+
+Restart the service to reset the users and timers for another demonstration.
+
 Local demo user:
 
 ```text

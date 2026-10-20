@@ -127,7 +127,8 @@ USocialSubsystem::USocialSubsystem()
 		MakeConfiguredFriend(1001, TEXT("Alex")),
 		MakeConfiguredFriend(1002, TEXT("Sam")),
 		MakeConfiguredFriend(1003, TEXT("Jamie")),
-		MakeConfiguredFriend(1004, TEXT("Morgan"))
+		MakeConfiguredFriend(1004, TEXT("Morgan")),
+		MakeConfiguredFriend(1013, TEXT("Robin"))
 	};
 
 	LocalUser = MockLocalUser;

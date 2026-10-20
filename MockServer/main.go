@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -88,6 +89,8 @@ func NewMockState() *ServerState {
 		1006: {UserID: 1006, DisplayName: "Riley", Status: StatusInGame, PartyID: 2003},
 		1007: {UserID: 1007, DisplayName: "Taylor", Status: StatusOnline, PartyID: 2003},
 		1008: {UserID: 1008, DisplayName: "Jordan", Status: StatusOffline},
+		1013: {UserID: 1013, DisplayName: "Robin", Status: StatusOnline},
+		1014: {UserID: 1014, DisplayName: "Cameron", Status: StatusOnline},
 		1009: {UserID: 1009, DisplayName: "Drew", Status: StatusOnline, PartyID: 2004},
 		1010: {UserID: 1010, DisplayName: "Avery", Status: StatusOnline, PartyID: 2004},
 		1011: {UserID: 1011, DisplayName: "Quinn", Status: StatusOnline, PartyID: 2004},
@@ -148,7 +151,7 @@ func NewMockState() *ServerState {
 		Parties:    parties,
 		PartyOrder: []int{2001, 2002, 2003, 2004},
 		Friendships: map[int][]int{
-			1000: {1001, 1002, 1003, 1004},
+			1000: {1001, 1002, 1003, 1004, 1013},
 		},
 	}
 }
@@ -405,8 +408,51 @@ func (c *Client) HasFriend(userID int) bool {
 }
 
 type Hub struct {
-	mu      sync.RWMutex
-	clients map[*Client]struct{}
+	mu       sync.RWMutex
+	clients  map[*Client]struct{}
+	demoOnce sync.Once
+}
+
+// Start once after the first client receives its initial snapshot.
+func (h *Hub) StartDemoActivity(state *ServerState) {
+	h.demoOnce.Do(func() {
+		go func() {
+			time.Sleep(20 * time.Second)
+			user, _, err := state.setUserStatus(1013, StatusOffline)
+			if err != nil {
+				log.Printf("demo friend logout failed: %v", err)
+				return
+			}
+			h.BroadcastFriendPresence(user)
+			log.Println("Demo: Robin went offline")
+		}()
+		go func() {
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for range ticker.C {
+				current, ok := state.userByID(1014)
+				if !ok {
+					continue
+				}
+				var user User
+				var party Party
+				var err error
+				if current.PartyID == 2002 {
+					user, party, err = state.leaveParty(1014, 2002)
+				} else {
+					user, party, err = state.joinParty(1014, 2002)
+				}
+				if err != nil {
+					log.Printf("demo party activity skipped: %v", err)
+					continue
+				}
+				h.BroadcastFriendPresence(user)
+				h.BroadcastPartyUpdated(party)
+				h.BroadcastSelfPartyChanged(user)
+				log.Printf("Demo: Cameron partyID=%d", user.PartyID)
+			}
+		}()
+	})
 }
 
 func NewHub() *Hub {
@@ -530,6 +576,7 @@ func HandleWebSocket(state *ServerState, hub *Hub, w http.ResponseWriter, r *htt
 	snapshot := state.snapshot(session.LocalUser, session.FriendIDs)
 	client.FriendIDs = idSet(state.friendIDsFor(snapshot.LocalUser.UserID, session.FriendIDs))
 	hub.Send(client, Event{Type: "session.snapshot", Data: snapshot})
+	hub.StartDemoActivity(state)
 
 	client.ReadPump(hub)
 }
